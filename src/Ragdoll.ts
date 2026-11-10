@@ -1,6 +1,8 @@
 import RAPIER, { World } from "@dimforge/rapier3d-compat";
 import { Group, Mesh, MeshNormalMaterial, MeshStandardMaterial, Object3D, Object3DEventMap, Quaternion, Scene, Vector3 } from "three";
 import { GLTFLoader } from "three/examples/jsm/Addons.js";
+import { StiffBody } from "./StiffBody.js";
+import { Character } from "./Character.js";
 
 type RagdollParts = 'head' | 'torso' | 'armUpperRight' | 'armLowerRight' | 'armUpperLeft' | 'armLowerLeft' | 'thighRight' | 'shinRight' | 'thighLeft' | 'shinLeft';
 
@@ -25,7 +27,7 @@ export class Ragdoll extends Object3D {
 
     private static readonly torsoHeight = 0.55;
 
-    private static readonly boneMapping = {
+    public static readonly boneMapping = {
         head: 'head',
         torso: 'spine',
         armUpperLeft: 'upperArml',
@@ -39,69 +41,39 @@ export class Ragdoll extends Object3D {
     };
     private initialBoneWorldQuaternions: Map<string, Quaternion> = new Map();
 
-    constructor(world: World, scene: Scene, loader: GLTFLoader) {
+    constructor(world: World, scene: Scene, loader: GLTFLoader, char: Character, initialSpawn: Vector3) {
         super()
+        this.world = world
+        this.mesh = char.mesh
+        // if (this.mesh) {scene.add(this.mesh)}
+        this.initialBoneWorldQuaternions = char.initialBoneWorldQuaternions
 
-        this.world = world;
+        // /**
+        //          * Store initial bone orientation from the blender mesh
+        //          * This is very important otherwise your mesh will be twisted
+        //          */
+        // const boneNames = new Set(Object.values(Ragdoll.boneMapping));
 
-        // Load a glTF resource
-        loader.load(
-            '/character.glb',
-            (glTF) => {
-                glTF.scene.traverse(o => {
-                    if (o instanceof Mesh) {
-                        const colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange'];
-                        const randomColor = colors[Math.floor(Math.random() * colors.length)];
-                        o.material = Math.random() > 0.5 ? new MeshNormalMaterial() : new MeshStandardMaterial({ color: randomColor });
+        // const traverseAndMapBones = (object: Object3D) => {
 
-                        o.castShadow = true
-                        o.receiveShadow = true
-                        o.frustumCulled = false
-                    }
-                })
+        //     // Lets see what we can find in the mesh and match it up with our mapping above
+        //     console.log(object)
 
-                this.mesh = glTF.scene
-                this.mesh.position.set(0, 10, 0)
-                scene.add(this.mesh)
+        //     if (boneNames.has(object.name)) {
+        //         const quat = new Quaternion();
+        //         object.getWorldQuaternion(quat);
+        //         this.initialBoneWorldQuaternions.set(object.name, quat);
+        //     }
+        //     for (const child of object.children) {
+        //         traverseAndMapBones(child);
+        //     }
+        // };
 
-                /**
-                 * Store initial bone orientation from the blender mesh
-                 * This is very important otherwise your mesh will be twisted
-                 */
-                const boneNames = new Set(Object.values(Ragdoll.boneMapping));
-
-                const traverseAndMapBones = (object: Object3D) => {
-
-                    // Lets see what we can find in the mesh and match it up with our mapping above
-                    console.log(object)
-
-                    if (boneNames.has(object.name)) {
-                        const quat = new Quaternion();
-                        object.getWorldQuaternion(quat);
-                        this.initialBoneWorldQuaternions.set(object.name, quat);
-                    }
-                    for (const child of object.children) {
-                        traverseAndMapBones(child);
-                    }
-                };
-
-                traverseAndMapBones(this.mesh);
-
-                this.createRagdoll();
-            },
-
-
-            // called while loading is progressing
-            function (xhr) {
-                console.log((xhr.loaded / xhr.total * 100) + '% loaded');
-            },
-            function (error) {
-                console.log('An error happened:', error);
-            }
-        );
+        // if (this.mesh) {traverseAndMapBones(this.mesh);}
+        this.createRagdoll(initialSpawn, char)
     }
 
-    private createRagdoll() {
+    private createRagdoll(initialSpawn: Vector3, char: Character) {
 
         // Adjust this to make it more flexible
         const stiffness = 0.03
@@ -113,8 +85,6 @@ export class Ragdoll extends Object3D {
         const shinLength = .43 - (stiffness * 2)
         const upperArmLength = .3 - (stiffness * 2)
         const lowerArmLength = .42 - (stiffness * 2)
-
-        const initialSpawn = new Vector3(0, 10, 0)
 
         const torsoDesc = RAPIER.ColliderDesc.cuboid(torsoWidth / 2, Ragdoll.torsoHeight / 2, 0.1);
         const torsoBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(...initialSpawn.toArray())
@@ -205,6 +175,22 @@ export class Ragdoll extends Object3D {
             this.world.createImpulseJoint(joint, parent1, parent2, true);
         }
 
+        if (char.stiffBodyCreated){
+            const bonePositions = char.getStiffBones()
+            if(bonePositions){
+                for (const part of Object.keys(StiffBody.boneMapping) as RagdollParts[]) {
+                    if(part in bonePositions){
+                        const translation = bonePositions[part][0];
+                        const rotation = bonePositions[part][1];
+
+                        const body = this[part];
+                        body.setTranslation(translation, true)
+                        body.setRotation(rotation, true)
+                    }
+                }
+            }
+        }
+
         createJoint(localAnchorHead, localAnchorNeck, this.head, this.torso)                                // Neck Joint
         createJoint(localAnchorRTorso, localAnchorRArm, this.torso, this.armUpperRight)                     // Shoulder Joint Right
         createJoint(localAnchorRArmBottom, localAnchorRArmLower, this.armUpperRight, this.armLowerRight)    // Elbow Joint right
@@ -216,11 +202,12 @@ export class Ragdoll extends Object3D {
         createJoint(localAnchorLLegUpperLower, localAnchorLLegLowerTop, this.thighLeft, this.shinLeft)      // knee joint left
 
         // For debuging you can disable this to freeze it and see joints in initial state
-        const enabled = true
+        // const enabled = true
 
-        for (const [key, _] of Object.entries(Ragdoll.boneMapping)) {
-            this[key as RagdollParts].setEnabled(enabled)
-        }
+        // for (const [key, _] of Object.entries(Ragdoll.boneMapping)) {
+        //     this[key as RagdollParts].setEnabled(enabled)
+         
+        // }
     }
 
     public update(_delta: number) {
